@@ -3,14 +3,42 @@ import requests
 import certifi
 from PIL import Image
 import io
+import time
 import os
 
 app = Flask(__name__)
 
 # 🔑 Replace with your real PlantNet API key
-PLANTNET_API_KEY = ""
-project = 'all'
+PLANTNET_API_KEY = "2b10szxE9XvhGDQZTpxrLUde"
+project = "all"
 PLANTNET_URL = f"https://my-api.plantnet.org/v2/identify/{project}?api-key={PLANTNET_API_KEY}"
+
+
+def post_with_retry(url, files, data, retries=3, delay=2):
+    """Try sending a POST request with retries."""
+    last_exception = None
+    for attempt in range(1, retries + 1):
+        try:
+            print(f"[INFO] Attempt {attempt}/{retries} sending request to PlantNet...")
+            response = requests.post(
+                url,
+                files=files,
+                data=data,
+                verify=certifi.where(),
+                timeout=30,
+            )
+            print(f"[INFO] Attempt {attempt} completed with status {response.status_code}")
+            return response
+        except requests.exceptions.RequestException as e:
+            last_exception = e
+            print(f"[ERROR] Attempt {attempt} failed: {e}")
+            if attempt < retries:
+                print(f"[INFO] Retrying in {delay} seconds...")
+                time.sleep(delay)
+            else:
+                print("[FATAL] All retries failed.")
+                raise last_exception
+
 
 @app.route("/identify", methods=["POST"])
 def identify_plant():
@@ -21,28 +49,41 @@ def identify_plant():
 
         image_file = request.files["images"]
 
-        # ✅ Resize large images (max 1024px)
+        # Detect extension
+        ext = os.path.splitext(image_file.filename)[1].lower()
         img = Image.open(image_file)
-        img.thumbnail((1024, 1024))  
+
+        # ✅ Resize large images (max 1024px)
+        img.thumbnail((1024, 1024))
+
         buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=85)
+
+        # ✅ Handle PNG or JPEG correctly
+        if ext in [".png"]:
+            if img.mode in ("RGBA", "P"):  # Convert if has alpha channel
+                img = img.convert("RGB")
+            img.save(buf, format="PNG")
+            mime_type = "image/png"
+            filename = "plant.png"
+        else:  # default → JPEG
+            if img.mode in ("RGBA", "P"):  # Convert for JPEG compatibility
+                img = img.convert("RGB")
+            img.save(buf, format="JPEG", quality=85)
+            mime_type = "image/jpeg"
+            filename = "plant.jpg"
+
         buf.seek(0)
 
         files = {
-            "images": ("plant.jpg", buf, "images/jpeg")
+            "images": (filename, buf, mime_type)
         }
 
         data = {}
         if "organs" in request.form:
             data["organs"] = request.form["organs"]
 
-        response = requests.post(
-            PLANTNET_URL,
-            files=files,
-            data=data,
-            verify=certifi.where(),  # secure SSL
-            timeout=30
-        )
+        # 🔄 Retry-enabled request
+        response = post_with_retry(PLANTNET_URL, files, data, retries=3, delay=2)
 
         if response.status_code != 200:
             return jsonify({
