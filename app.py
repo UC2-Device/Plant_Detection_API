@@ -5,11 +5,13 @@ from PIL import Image
 import io
 import time
 import os
+from dotenv import load_dotenv
+load_dotenv()
 
 app = Flask(__name__)
 
 # 🔑 Replace with your real PlantNet API key
-PLANTNET_API_KEY = "2b10szxE9XvhGDQZTpxrLUde"
+PLANTNET_API_KEY = os.getenv("PLANTNET_API_KEY")
 project = "all"
 PLANTNET_URL = f"https://my-api.plantnet.org/v2/identify/{project}?api-key={PLANTNET_API_KEY}"
 
