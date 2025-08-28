@@ -6,18 +6,25 @@ import io
 import time
 import os
 from dotenv import load_dotenv
+
+# Load environment variables from .env
 load_dotenv()
 
 app = Flask(__name__)
 
-# 🔑 Replace with your real PlantNet API key
+# PlantNet API key from .env
 PLANTNET_API_KEY = os.getenv("PLANTNET_API_KEY")
+if not PLANTNET_API_KEY:
+    raise ValueError("PLANTNET_API_KEY not found in environment variables")
+
 project = "all"
 PLANTNET_URL = f"https://my-api.plantnet.org/v2/identify/{project}?api-key={PLANTNET_API_KEY}"
 
+MAX_RETRIES = 3
+RETRY_DELAY = 2  # seconds
 
-def post_with_retry(url, files, data, retries=3, delay=2):
-    """Try sending a POST request with retries."""
+def post_with_retry(url, files, data, retries=MAX_RETRIES, delay=RETRY_DELAY):
+    """Send POST request with retries."""
     last_exception = None
     for attempt in range(1, retries + 1):
         try:
@@ -27,9 +34,10 @@ def post_with_retry(url, files, data, retries=3, delay=2):
                 files=files,
                 data=data,
                 verify=certifi.where(),
-                timeout=30,
+                timeout=30
             )
             print(f"[INFO] Attempt {attempt} completed with status {response.status_code}")
+            response.raise_for_status()
             return response
         except requests.exceptions.RequestException as e:
             last_exception = e
@@ -41,34 +49,33 @@ def post_with_retry(url, files, data, retries=3, delay=2):
                 print("[FATAL] All retries failed.")
                 raise last_exception
 
-
 @app.route("/identify", methods=["POST"])
 def identify_plant():
     try:
-        # ✅ Check file
+        # Check for uploaded image
         if "images" not in request.files:
             return jsonify({"error": "No image file provided"}), 400
 
         image_file = request.files["images"]
 
-        # Detect extension
+        # Determine extension
         ext = os.path.splitext(image_file.filename)[1].lower()
         img = Image.open(image_file)
 
-        # ✅ Resize large images (max 1024px)
+        # Resize large images (max 1024px)
         img.thumbnail((1024, 1024))
 
         buf = io.BytesIO()
 
-        # ✅ Handle PNG or JPEG correctly
+        # Save image correctly
         if ext in [".png"]:
-            if img.mode in ("RGBA", "P"):  # Convert if has alpha channel
+            if img.mode in ("RGBA", "P"):
                 img = img.convert("RGB")
             img.save(buf, format="PNG")
             mime_type = "image/png"
             filename = "plant.png"
-        else:  # default → JPEG
-            if img.mode in ("RGBA", "P"):  # Convert for JPEG compatibility
+        else:  # default JPEG
+            if img.mode in ("RGBA", "P"):
                 img = img.convert("RGB")
             img.save(buf, format="JPEG", quality=85)
             mime_type = "image/jpeg"
@@ -84,8 +91,8 @@ def identify_plant():
         if "organs" in request.form:
             data["organs"] = request.form["organs"]
 
-        # 🔄 Retry-enabled request
-        response = post_with_retry(PLANTNET_URL, files, data, retries=3, delay=2)
+        # Send request with retry
+        response = post_with_retry(PLANTNET_URL, files, data)
 
         if response.status_code != 200:
             return jsonify({
@@ -94,11 +101,24 @@ def identify_plant():
                 "details": response.text
             }), response.status_code
 
-        return jsonify(response.json())
+        # Extract JSON and summarize
+        data_json = response.json()
+        if "results" not in data_json or len(data_json["results"]) == 0:
+            return jsonify({"error": "No species detected"}), 404
+
+        best_result = data_json["results"][0]["species"]
+        summary = {
+            "best_match": best_result.get("scientificName"),
+            "common_names": best_result.get("commonNames", []),
+            "family": best_result.get("family", {}).get("scientificName"),
+            "genus": best_result.get("genus", {}).get("scientificName"),
+            "score": data_json["results"][0].get("score")
+        }
+
+        return jsonify(summary["common_names"])
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
